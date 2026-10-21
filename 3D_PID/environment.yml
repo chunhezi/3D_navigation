@@ -1,0 +1,13 @@
+name: 3d-pid
+channels:
+  - defaults
+dependencies:
+  - python=3.11
+  - pip
+  - numpy
+  - sympy
+  - opencv
+  - pyqt=6
+  - pyserial
+  - pip:
+      - pymodbus
