@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+
+# Environments and local configuration
+.venv/
+venv/
+env/
+.env
+.env.*
+!.env.example
+
+# IDE and OS files
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+*.onetoc2
+
+# Runtime recordings and generated output
+recordings/
+*.mp4
+*.avi
+*.mkv
+*.mov
+*.csv
+*.xlsx
+*.log
+*.pickle
+*.pkl
+
+# Vendor SDKs (installed separately)
+MvImport/
