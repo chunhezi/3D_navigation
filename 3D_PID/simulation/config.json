@@ -1,0 +1,13 @@
+{
+  "duration_s": 90.0,
+  "dt_s": 0.15,
+  "reference": "project",
+  "plant_mode": "equilibrium",
+  "initial_position_cm": [0.0, 0.0, 0.5],
+  "initial_velocity_m_s": [0.0, 0.0, 0.0],
+  "dynamic_viscosity_pa_s": 0.0485,
+  "disturbance_start_s": 20.0,
+  "disturbance_force_n": [0.000002, -0.000001, 0.0],
+  "pump_weak_s": 6.0,
+  "pump_strong_s": 2.0
+}
