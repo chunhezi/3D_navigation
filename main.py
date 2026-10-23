@@ -68,6 +68,9 @@ EXPERIMENT_RECORD_ROOT = Path("recordings")
 GUI_FRAME_CYCLE = 4
 GUI_FRAME_KEEP = 3
 
+# Set False to run vision and coil control without the broken Arduino pump.
+PUMP_ENABLED = False
+
 port_state = False
 motion_state = False
 camera_state = False
@@ -79,8 +82,8 @@ roi_w = 185        # 宽
 
 # ============== 本次视觉修改【上视参数】：面积初值开始 ==============
 # 作用：配合两路统一预处理，改用未腐蚀暗珠前景的面积；重新标定前须在候选窗确认。
-min_area = 100   # 轮廓面积下限（px²）；覆盖 DetectorConfig 默认值
-max_area = 300   # 轮廓面积上限（px²）；不再沿用腐蚀后黑孔的 450～600
+min_area = 10   # 轮廓面积下限（px²）；覆盖 DetectorConfig 默认值
+max_area = 100   # 轮廓面积上限（px²）；不再沿用腐蚀后黑孔的 450～600
 # ============== 本次视觉修改【上视参数】：面积初值结束 ==============
 Camera_index = 0
 
@@ -162,11 +165,11 @@ class WinForm(QtWidgets.QWidget, Ui_Form):
             "dual_calibration_pair_max_dt_ms": 80.0,
             "top_calibration_diameter_min_px": 5.0,
             "top_calibration_diameter_max_px": 35.0,
-            "top_calibration_circularity_min": 0.50,
+            "top_calibration_circularity_min": 0.40,
             "side_calibration_diameter_min_px": 8.0,
             "side_calibration_diameter_max_px": 20.0,
             "side_calibration_circularity_min": 0.30,
-            "side_threshold": 230,
+            "side_threshold": 90,
             "side_roi_center_offset_x": 0,
             "side_roi_center_offset_y": -50,
             "top_calibration_center_spread_max_px": 3.0,
@@ -190,6 +193,7 @@ class WinForm(QtWidgets.QWidget, Ui_Form):
                 n_weak=self.N_weak,
                 n_period=self.N_period,
                 n_recover=self.N_recover,
+                pump_enabled=PUMP_ENABLED,
                 # ==================== 泵相关：调度配置结束 ====================
                 current_limit=8.0,
             ),
@@ -208,6 +212,12 @@ class WinForm(QtWidgets.QWidget, Ui_Form):
         # 功能：缓存 Arduino 泵句柄与串口连接状态，与设备管理器同步。
         self.pump = None
         self.arduino_port_state = False
+        if not PUMP_ENABLED:
+            for widget_name in ("label_arduino_port", "comboBox_arduino_port", "button_open_arduino", "button_test_pump"):
+                widget = getattr(self, widget_name, None)
+                if widget is not None:
+                    widget.setEnabled(False)
+            print("[INFO] Pump control disabled (PUMP_ENABLED=False)")
         # ==================== 泵相关：连接状态结束 ====================
 
         # ===== 【REFACTOR_PHASE7】机器人视觉检测（从 detect 剥离）=====

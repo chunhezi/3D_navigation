@@ -158,6 +158,7 @@ class RobotDetectionResult:
     scene_just_initialized: bool = False
     has_contours: bool = False
     calibration_observation: Optional[ViewCalibrationObservation] = None
+    calibration_rejection_reason: Optional[str] = None
     filtered_contour_count: int = 0
     scale_calibrated: bool = False
     active_px_per_mm: float = 380.0 / 30.0
@@ -484,6 +485,12 @@ class RobotDetector:
                     circularity=circularity,
                     candidate_count=1,
                 )
+            else:
+                result.calibration_rejection_reason = "contour_touches_roi_boundary_or_invalid"
+        elif not result.scene_just_initialized:
+            result.calibration_rejection_reason = (
+                f"filtered_contour_count={len(filtered_contours)}"
+            )
             # ============== 本次视觉修改【上视接入】：腐蚀前测径结束 ==============
 
         # ==================================================================

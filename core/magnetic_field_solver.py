@@ -161,21 +161,21 @@ def integrate_magnetic_field(x0, y0, z0):
         # 计算磁场分量的值
         field_values = field_func(x0, y0, z0, theta0)
         # 对 theta0 进行梯形积分
-        B_g[idx % 6, idx // 6] = np.trapz(field_values, theta0)
+        B_g[idx % 6, idx // 6] = np.trapezoid(field_values, theta0)
         idx += 1
 
     for i, field_func in fields_y.items():
         # 计算磁场分量的值
         field_values = field_func(x0, y0, z0, theta0)
         # 对 theta0 进行梯形积分
-        B_g[idx % 6, idx // 6] = np.trapz(field_values, theta0)
+        B_g[idx % 6, idx // 6] = np.trapezoid(field_values, theta0)
         idx += 1
 
     for i, field_func in fields_z.items():
         # 计算磁场分量的值
         field_values = field_func(x0, y0, z0, theta0)
         # 对 theta0 进行梯形积分
-        B_g[idx % 6, idx // 6] = np.trapz(field_values, theta0)
+        B_g[idx % 6, idx // 6] = np.trapezoid(field_values, theta0)
         idx += 1
     B_g_1 = B_g[:, [0, 1, 2, 3, 4, 5]]
     #调节了输出的矩阵的表达式，在0点附近为一个

@@ -202,6 +202,7 @@ class SideDetectionResult:
     diameter_px: Optional[float]
     circularity: Optional[float]
     candidate_count: int
+    contour_areas_px2: tuple[float, ...]
     calibration_observation: Optional[ViewCalibrationObservation]
     scale_calibrated: bool
     zero_calibrated: bool
@@ -615,6 +616,7 @@ class SideDetector:
         diameter_px: Optional[float],
         circularity: Optional[float],
         candidate_count: int,
+        contour_areas_px2: tuple[float, ...],
         calibration_observation: Optional[ViewCalibrationObservation],
         pair_id: int,
         timestamp: float,
@@ -640,6 +642,7 @@ class SideDetector:
             diameter_px=diameter_px,
             circularity=circularity,
             candidate_count=candidate_count,
+            contour_areas_px2=contour_areas_px2,
             calibration_observation=calibration_observation,
             scale_calibrated=self.scale_calibrated,
             zero_calibrated=self.zero_calibrated,
@@ -715,6 +718,7 @@ class SideDetector:
             cv2.RETR_EXTERNAL,
             cv2.CHAIN_APPROX_SIMPLE,
         )
+        contour_areas_px2 = tuple(float(cv2.contourArea(c)) for c in contours)
 
         # ==================================================================
         # 步骤 5：准备五路 BGR 底图（全图尺寸，不 crop）
@@ -779,6 +783,7 @@ class SideDetector:
                 diameter_px=None,
                 circularity=None,
                 candidate_count=0,
+                contour_areas_px2=contour_areas_px2,
                 calibration_observation=None,
                 pair_id=pair_id,
                 timestamp=timestamp,
@@ -794,7 +799,9 @@ class SideDetector:
         # ==================================================================
         # 步骤 7b：从合格候选中取面积最大者（第一版无评分）
         # ==================================================================
-        selected_area, _selected_idx, selected_contour = max(area_candidates, key=lambda item: item[0])
+        selected_area, _selected_idx, selected_contour = max(
+            area_candidates, key=lambda item: item[0]
+        )
         moments = cv2.moments(selected_contour)
         if moments["m00"] == 0:
             self._draw_main_overlay(
@@ -812,6 +819,7 @@ class SideDetector:
                 diameter_px=None,
                 circularity=None,
                 candidate_count=candidate_count,
+                contour_areas_px2=contour_areas_px2,
                 calibration_observation=None,
                 pair_id=pair_id,
                 timestamp=timestamp,
@@ -907,6 +915,7 @@ class SideDetector:
             diameter_px=diameter_px,
             circularity=circularity,
             candidate_count=candidate_count,
+            contour_areas_px2=contour_areas_px2,
             calibration_observation=calibration_observation,
             pair_id=pair_id,
             timestamp=timestamp,

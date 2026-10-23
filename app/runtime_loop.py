@@ -37,6 +37,8 @@ class RuntimeLoopConfig:
     n_period: int = 100
     # 强→弱下降沿后的回流保持步数
     n_recover: int = 0
+    # Disable physical pump commands while keeping the original phase metadata.
+    pump_enabled: bool = True
     # ==================== 泵相关：相位与恢复时序结束 ====================
     # 线圈电流限幅（A）
     current_limit: float = 8.0
@@ -139,6 +141,8 @@ class RuntimeLoop:
 
     def _apply_pump_command(self, pump_flag: int) -> None:
         """泵命令边沿下发（与原 prev_pump_cmd 逻辑一致）。"""
+        if not self.cfg.pump_enabled:
+            return
         if (self.prev_pump_cmd is None) or (pump_flag != self.prev_pump_cmd):
             self.prev_pump_cmd = pump_flag
             if self.devices is not None:

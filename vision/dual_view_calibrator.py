@@ -299,6 +299,7 @@ class DualViewCalibrator:
         pair_dt_ms: float,
         top: ViewCalibrationObservation,
         side: ViewCalibrationObservation,
+        return_rejection_reason: bool = False,
     ) -> bool:
         """
         尝试接收一对标定观测。
@@ -306,51 +307,57 @@ class DualViewCalibrator:
         全部入样条件见模块文档「add_pair() 拒收条件」。
         成功时 append 到内部列表并返回 True；任一条件不满足返回 False。
         """
+        def reject(reason: str):
+            return (False, reason) if return_rejection_reason else False
+
+        def accept():
+            return (True, "accepted") if return_rejection_reason else True
+
         if self._completed:
-            return False
+            return reject("already_completed")
 
         cfg = self.cfg
 
         # --- 配对元数据 ---
         if not math.isfinite(float(pair_dt_ms)):
-            return False
+            return reject("invalid_pair_delay")
         if any(sample.pair_id == pair_id for sample in self._samples):
-            return False
+            return reject("duplicate_pair_id")
         if float(pair_dt_ms) > float(cfg.pair_max_dt_ms):
-            return False
+            return reject(f"pair_delay>{cfg.pair_max_dt_ms}ms")
 
         # --- 候选数量 ---
         # 上视仍要求唯一候选，避免标定对象存在歧义。
         if top.candidate_count != 1:
-            return False
+            return reject(f"top_candidate_count={top.candidate_count},need=1")
 
         # 侧视允许存在多个面积粗筛候选。
         # SideDetector 已经使用其中面积最大的候选作为磁珠。
         if side.candidate_count < 1:
-            return False
+            return reject(f"side_candidate_count={side.candidate_count},need>=1")
         if not _is_finite_observation(top) or not _is_finite_observation(side):
-            return False
+            return reject("non_finite_observation")
 
         # --- 直径与圆度粗筛 ---
         top_diameter = float(top.diameter_px)
         ### 新增：侧视必须同时具有有限、正值的水平和竖直直径才能参与标定。
         if side.diameter_u_px is None or side.diameter_v_px is None:
-            return False
+            return reject("side_projection_diameter_missing")
         side_diameters = (float(side.diameter_u_px), float(side.diameter_v_px))
         if not all(math.isfinite(d) and d > 0.0 for d in side_diameters):
-            return False
+            return reject(f"invalid_side_diameters={side_diameters}")
         ### 方向直径有效性检查结束。
         if not (cfg.top_diameter_min_px <= top_diameter <= cfg.top_diameter_max_px):
-            return False
+            return reject(f"top_diameter={top_diameter:.2f}px,outside=[{cfg.top_diameter_min_px},{cfg.top_diameter_max_px}]")
         ### 调整：现有侧视标定直径上下界同时约束 Y/Z 两个方向。
         if not all(cfg.side_diameter_min_px <= d <= cfg.side_diameter_max_px
                    for d in side_diameters):
-            return False
+            return reject(f"side_diameters={side_diameters},outside=[{cfg.side_diameter_min_px},{cfg.side_diameter_max_px}]")
         ### 方向直径上下界检查结束。
         if float(top.circularity) < float(cfg.top_circularity_min):
-            return False
+            return reject(f"top_circularity={top.circularity:.3f},need>={cfg.top_circularity_min}")
         if float(side.circularity) < float(cfg.side_circularity_min):
-            return False
+            return reject(f"side_circularity={side.circularity:.3f},need>={cfg.side_circularity_min}")
 
         self._samples.append(
             DualViewCalibrationSample(
@@ -360,7 +367,7 @@ class DualViewCalibrator:
                 side=side,
             )
         )
-        return True
+        return accept()
 
     def try_finalize(self) -> Optional[DualViewCalibrationResult]:
         """

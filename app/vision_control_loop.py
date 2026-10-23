@@ -97,12 +97,12 @@ class VisionControlLoopConfig:
     side_camera_index: int = 0
     side_camera_timeout_ms: int = 50
     side_roi_half_height: int = 100
-    side_roi_half_width: int = 350
+    side_roi_half_width: int = 200
     side_roi_center_offset_x: float = 0.0
     side_roi_center_offset_y: float = 0.0
     side_threshold: int = 80
-    side_area_min: int = 50
-    side_area_max: int = 150 # 这边可以把max给打一下，磁珠前后的移动导致的放大
+    side_area_min: int = 20
+    side_area_max: int = 50 # 这边可以把max给打一下，磁珠前后的移动导致的放大
     # 超过该值时在 side_main 叠加 PAIR DELAY WARNING（仍允许显示）
     side_pair_max_dt_ms: float = 80.0
     side_mvs_runtime_dir: Optional[str] = None
@@ -590,6 +590,42 @@ class VisionControlLoop:
         top_obs = getattr(top_result, "calibration_observation", None)
         side_obs = getattr(side_result, "calibration_observation", None)
 
+        # Emit actionable reasons when a visible detection is rejected by the
+        # calibration gate. Throttle to one diagnostic per 30 paired frames.
+        if pair_id % 30 == 0 and not self.dual_calibrator.completed:
+            reasons = []
+            if bool(self.is_motion_active()):
+                reasons.append("motion_active")
+            if pair_dt_ms is None:
+                reasons.append("no_pair_timestamp")
+            elif float(pair_dt_ms) > float(self._get_loop_cfg("dual_calibration_pair_max_dt_ms", 80.0)):
+                reasons.append(f"pair_delay>{self._get_loop_cfg('dual_calibration_pair_max_dt_ms', 80.0)}ms")
+            if top_result is None:
+                reasons.append("no_top_result")
+            elif top_obs is None:
+                reasons.append(
+                    getattr(top_result, "calibration_rejection_reason", None)
+                    or "top_calibration_observation_rejected"
+                )
+            if side_result is None:
+                reasons.append("no_side_result")
+            elif side_obs is None:
+                reasons.append("side_calibration_observation_rejected")
+            if top_result is not None and getattr(top_result, "scene_just_initialized", False):
+                reasons.append("top_scene_just_initialized")
+            if top_result is not None and top_obs is not None and getattr(self.robot_detector, "circle_position", None) is None:
+                reasons.append("top_reference_circle_missing")
+            if reasons:
+                print(f"[DUAL CAL BLOCKED] pair={pair_id} reasons={','.join(reasons)}")
+            elif top_obs is not None and side_obs is not None:
+                print(
+                    f"[DUAL CAL OBS] pair={pair_id} "
+                    f"top_d={top_obs.diameter_px:.1f}px top_circ={top_obs.circularity:.3f} "
+                    f"side_d=({side_obs.diameter_u_px:.1f},{side_obs.diameter_v_px:.1f})px "
+                    f"side_circ={side_obs.circularity:.3f} "
+                    f"accepted={self.dual_calibrator.progress}"
+                )
+
         if pair_id % 30 == 0:
             print(
                 "[DUAL CAL DEBUG] "
@@ -626,12 +662,25 @@ class VisionControlLoop:
             return
         # ============== 本次视觉修改：上视原点就绪检查结束 ==============
 
-        self.dual_calibrator.add_pair(
+        accepted, rejection_reason = self.dual_calibrator.add_pair(
             pair_id=pair_id,
             pair_dt_ms=float(pair_dt_ms),
             top=top_result.calibration_observation,
             side=side_result.calibration_observation,
+            return_rejection_reason=True,
         )
+
+        if pair_id % 30 == 0:
+            print(
+                f"[DUAL CAL SAMPLE] pair={pair_id} accepted={accepted} "
+                f"reason={rejection_reason} progress={self.dual_calibrator.progress}/"
+                f"{self.dual_calibrator.required_count} "
+                f"top(d={top_obs.diameter_px:.2f}px,circ={top_obs.circularity:.3f},"
+                f"candidates={top_obs.candidate_count}) "
+                f"side(du={side_obs.diameter_u_px},dv={side_obs.diameter_v_px},"
+                f"d={side_obs.diameter_px:.2f}px,circ={side_obs.circularity:.3f},"
+                f"candidates={side_obs.candidate_count})"
+            )
 
         calibration_result = self.dual_calibrator.try_finalize()
         if calibration_result is None:
@@ -1030,6 +1079,25 @@ class VisionControlLoop:
                 self.latest_side_result = side_result
                 self.latest_top_result = top_result
 
+                if side_result is not None and new_pair_id is not None and new_pair_id % 30 == 0:
+                    detector = self.side_detector
+                    raw_areas = getattr(side_result, "contour_areas_px2", ())
+                    min_area = getattr(detector, "area_min", None)
+                    max_area = getattr(detector, "area_max", None)
+                    in_range = (
+                        [a for a in raw_areas if min_area <= a <= max_area]
+                        if min_area is not None and max_area is not None
+                        else []
+                    )
+                    print(
+                        f"[SIDE AREA] pair={new_pair_id} "
+                        f"raw_contours_px2={[round(a, 1) for a in raw_areas]} "
+                        f"accepted_px2={[round(a, 1) for a in in_range]} "
+                        f"selected_px2={getattr(side_result, 'selected_area', None)} "
+                        f"range=[{min_area},{max_area}] "
+                        f"valid={getattr(side_result, 'valid', None)}"
+                    )
+
                 if new_pair_id is not None:
                     self._update_dual_calibration(
                         pair_id=new_pair_id,
@@ -1249,8 +1317,16 @@ class VisionControlLoop:
                         frame_bundle.get("top_main"),
                         frame_bundle.get("side_main"),
                     )
-                    video_output.write(dual)
-                    written_frames += 1
+                    # VideoWriter encodes a fixed frame rate. The vision loop
+                    # can run slower than that rate, so repeat the latest
+                    # frame to keep playback duration aligned with wall time.
+                    fps = max(1.0, float(self.cfg.fps))
+                    elapsed_s = max(0.0, time.perf_counter() - record_start_time)
+                    target_frame_count = int(elapsed_s * fps) + 1
+                    frames_to_write = max(1, target_frame_count - written_frames)
+                    for _ in range(frames_to_write):
+                        video_output.write(dual)
+                    written_frames += frames_to_write
 
                 # ----- 【双视·共用】一次回调刷新全部 QLabel -----
                 self.on_frame_ready(frame_bundle)
