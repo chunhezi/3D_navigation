@@ -1,0 +1,19 @@
+{
+  "offline_design": {
+    "observer_gain": 4.0,
+    "filter_rate": 1.0,
+    "max_feedback_gain": 2.0,
+    "gamma": 1.0
+  },
+  "online_learning": {
+    "gamma_learning": 300.0,
+    "phi": 1.0,
+    "mu": 0.0,
+    "eta1": 5.0,
+    "eta2": 5.0,
+    "refined_start_s": 5.0,
+    "weight_bound": 4.0,
+    "hidden_neurons": 1,
+    "seed": 2026
+  }
+}

@@ -1,0 +1,5 @@
+numpy>=1.25
+matplotlib>=3.8
+pillow>=9
+scipy>=1.10
+cvxpy>=1.4
