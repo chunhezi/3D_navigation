@@ -78,6 +78,8 @@ class Stabilize3DMotionMode(BaseMotionMode):
         self.last_pair_id = None
         self._start_target_pending = False
         self._first_log_time_s: Optional[float] = None
+        self._reference_phase = "entry"
+        self._reference_info = {}
         self._records: list[Dict[str, Any]] = []
 
     def _clear_shared_logs(self) -> None:
@@ -115,6 +117,8 @@ class Stabilize3DMotionMode(BaseMotionMode):
         self._records.clear()
         self._clear_shared_logs()
         self._first_log_time_s = None
+        self._reference_phase = "entry"
+        self._reference_info = {}
         mm = self.ctx.magnetic_model
         self.last_pair_id = getattr(mm, "measurement_pair_id", None)
         self.ref_path_3d = _validated_ref_path_3d(REF_PATH_3D)
@@ -128,7 +132,7 @@ class Stabilize3DMotionMode(BaseMotionMode):
         #   self.target_xyz  -> PID 当前目标点 (3,) cm
         #   self.ref_path_3d -> 整条航点路径 (N,3) cm，供上下视叠图
         # ============================================================================
-        reset_reference_3d()
+        reset_reference_3d(mode_override=getattr(self, "reference_mode", None))
         (
             self.target_xyz,
             self.ref_path_3d,
@@ -267,8 +271,10 @@ class Stabilize3DMotionMode(BaseMotionMode):
         ) = get_reference_3d(
             advance=True,
             dt_s=float(obs.dt),
+            current_position_cm=position_xyz,
         )
-        _ = reference_info  # 仅调试/日志用，当前不参与控制
+        self._reference_phase = reference_info.get("phase", "tracking")
+        self._reference_info = dict(reference_info)
         # ============================================================================
         # [REFERENCE 3D] END: 每个新的、有效的 3D measurement pair 推进一次参考
         # ============================================================================
@@ -400,12 +406,16 @@ class Stabilize3DMotionMode(BaseMotionMode):
                 "integral_enabled": bool(pid_cfg.ENABLE_INTEGRAL),
                 "valid_control": bool(valid_control),
                 "reason": str(reason),
+                "reference_phase": self._reference_phase,
+                "reference_info": dict(self._reference_info),
             }
         )
 
     def get_overlay_state(self) -> Dict[str, Any]:
         # [3D_PID] 仅发布绘图所需的防御性目标副本和只读路径引用。
         return {
+            "draw_trace": self._reference_phase == "tracking",
+            "reference_info": dict(self._reference_info),
             "target_xyz": (
                 None if self.target_xyz is None else self.target_xyz.copy()
             ),
@@ -426,6 +436,9 @@ class Stabilize3DMotionMode(BaseMotionMode):
         parameters.update(gravity_parameter_snapshot())
         # [REFERENCE 3D] BEGIN: 保存当次三维参考轨迹参数快照
         parameters.update(reference_parameter_snapshot_3d())
+        if getattr(self, "reference_mode", None) == 'rrt_navigation':
+            from navigation.reference import navigation_snapshot
+            parameters.update(navigation_snapshot())
         # [REFERENCE 3D] END: 保存当次三维参考轨迹参数快照
         parameters.update(
             {
@@ -462,6 +475,8 @@ class Stabilize3DMotionMode(BaseMotionMode):
             "integral_enabled": series("integral_enabled", dtype=bool),
             "valid_control": series("valid_control", dtype=bool),
             "reason": np.asarray([r["reason"] for r in self._records], dtype=object),
+            "reference_phase": np.asarray([r["reference_phase"] for r in self._records], dtype=object),
+            "reference_info": [r["reference_info"] for r in self._records],
             "parameters": parameters,
             "ref_path_3d_cm": (
                 None if self.ref_path_3d is None else self.ref_path_3d.copy()

@@ -36,10 +36,12 @@ KP_Y = 8e-6
 KP_Z = 2e-5
 
 ENABLE_INTEGRAL = True
-
-KI_X = 3e-6
+#KI_X = 1.5e-6
+#KI_Y = 4e-6
+#KI_Z = 2e-6
+KI_X = 1.5e-6
 KI_Y = 4e-6
-KI_Z = 3e-6
+KI_Z = 2e-6
 
 INTEGRAL_THRESHOLD_X_CM = 0.20
 INTEGRAL_THRESHOLD_Y_CM = 0.20

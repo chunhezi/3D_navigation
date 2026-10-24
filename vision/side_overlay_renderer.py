@@ -77,6 +77,7 @@ class SideOverlayRenderer:
         frame_shape: tuple,
         side_detector: Any,
         ref_path_3d,
+        navigation_scene=None,
     ) -> None:
         if ref_path_3d is None:
             path = None
@@ -92,6 +93,7 @@ class SideOverlayRenderer:
         # changes, so identity is a constant-time cache key on normal frames.
         path_key = None if path is None else (id(path), path.shape)
         key = (
+            id(navigation_scene),
             int(frame_shape[0]),
             int(frame_shape[1]),
             self._calibration_key(side_detector),
@@ -110,6 +112,12 @@ class SideOverlayRenderer:
         self.last_pair_id = None
         self.last_trace_pixel = None
 
+        if navigation_scene is not None:
+            from vision.navigation_overlay import draw_navigation_scene
+            draw_navigation_scene(
+                self.static_overlay_bgr, self.static_overlay_mask, navigation_scene,
+                lambda points: self.project_path_to_pixels(points, side_detector),
+            )
         pixels = self.project_path_to_pixels(path, side_detector)
         if len(pixels) >= 2:
             cv2.polylines(
@@ -177,6 +185,8 @@ class SideOverlayRenderer:
         motion_active: bool,
         target_xyz=None,
         ref_path_3d=None,
+        draw_trace: bool = True,
+        navigation_scene=None,
     ) -> np.ndarray:
         if not bool(getattr(side_detector, "y_calibrated", False)):
             self._was_motion_active = bool(motion_active)
@@ -186,9 +196,12 @@ class SideOverlayRenderer:
             self.reset()
         self._was_motion_active = bool(motion_active)
 
-        self._ensure_layers(frame_bgr.shape, side_detector, ref_path_3d)
-        if motion_active:
+        self._ensure_layers(frame_bgr.shape, side_detector, ref_path_3d, navigation_scene)
+        if motion_active and draw_trace:
             self._append_current_pair(magnetic_model, side_detector)
+        elif not draw_trace:
+            self.last_trace_pixel = None
+            self.last_pair_id = getattr(magnetic_model, "measurement_pair_id", None)
 
         out = trajectory_overlay.blend_masked_overlay(
             frame_bgr,

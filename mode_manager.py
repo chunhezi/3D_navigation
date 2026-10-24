@@ -13,6 +13,7 @@
 """
 
 from motion_modes.motion_stabilize_3d import Stabilize3DMotionMode
+from motion_modes.motion_navigate_3d import Navigate3DMotionMode, StaticObstacle3DMotionMode, Slalom3DMotionMode
 
 
 class ModeManager:
@@ -59,6 +60,9 @@ class ModeManager:
 
         # 模式名称到模式类的映射
         self.mode_table = {
+            "navigate_3d": Navigate3DMotionMode,
+            "static_obstacle_3d": StaticObstacle3DMotionMode,
+            "slalom_3d": Slalom3DMotionMode,
             # [3D_PID] UI 名称由 main.py 映射为该内部模式键。
             "stabilize_3d": Stabilize3DMotionMode,
         }

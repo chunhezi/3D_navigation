@@ -14,6 +14,7 @@ Current implementation:
     - discrete step reference
     - time-parameterized helix reference
     - wave circle reference (two height oscillations per circle)
+    - spatial figure-eight reference
     - no arrival detection
     - no interpolation / carrot / look-ahead
 
@@ -38,7 +39,11 @@ import numpy as np
 #   "step"
 #   "helix"
 #   "wave_circle" (起伏圆)
-REFERENCE_MODE_3D = "wave_circle"
+#   "spatial_figure8" (空间八字)
+#   "rising_rounded_rectangle" (上升圆角矩形)
+#   "rising_butterfly" (上升空间蝴蝶)
+#   "rising_flower" (上升五瓣花)
+REFERENCE_MODE_3D = "helix"
 
 
 # Fixed reference, used only when REFERENCE_MODE_3D == "fixed".
@@ -123,6 +128,53 @@ WAVE_CIRCLE_PERIOD_S = 40.0
 WAVE_CIRCLE_TURNS = 2.0
 WAVE_CIRCLE_OVERLAY_POINTS = 721
 
+# Spatial figure eight (cm): x=Ax*sin(theta), y=Ay*sin(2*theta),
+# Z rises linearly from START to END. Both camera overlays use the same XYZ.
+FIGURE8_X_AMPLITUDE_CM = 0.75
+FIGURE8_Y_AMPLITUDE_CM = 0.50
+FIGURE8_Z_START_CM = 0.50
+FIGURE8_Z_END_CM = 1.20
+FIGURE8_PERIOD_S = 60.0
+FIGURE8_CYCLES = 1.0
+FIGURE8_OVERLAY_POINTS = 721
+
+# Rounded XY rectangle with an ascending Z reference (centimetres).
+RECT_X_HALF_CM = 0.75
+RECT_Y_HALF_CM = 0.40
+RECT_Z_START_CM = 0.50
+RECT_Z_END_CM = 1.20
+RECT_DURATION_S = 60.0
+RECT_ROUNDNESS = 2.0
+RECT_OVERLAY_POINTS = 721
+
+# Ascending 2:3 Lissajous curve (space butterfly), all dimensions in cm.
+BUTTERFLY_X_AMPLITUDE_CM = 0.75
+BUTTERFLY_Y_AMPLITUDE_CM = 0.40
+BUTTERFLY_Z_START_CM = 0.50
+BUTTERFLY_Z_END_CM = 1.20
+BUTTERFLY_DURATION_S = 60.0
+BUTTERFLY_OVERLAY_POINTS = 721
+
+# Smooth five-lobed polar flower, ascending in Z. Centimetres and seconds.
+FLOWER_X_RADIUS_CM = 0.75
+FLOWER_Y_RADIUS_CM = 0.40
+FLOWER_Z_START_CM = 0.50
+FLOWER_Z_END_CM = 1.20
+FLOWER_DURATION_S = 75.0
+FLOWER_PETALS = 5
+FLOWER_PETAL_DEPTH = 0.25
+FLOWER_OVERLAY_POINTS = 1001
+
+# A smooth entry tail is enabled when the caller supplies the measured XYZ.
+# These are reference speeds, not guaranteed physical bead speeds.
+ENTRY_ENABLED = True
+ENTRY_XY_SPEED_CM_S = 0.10
+ENTRY_Z_SPEED_CM_S = 0.05
+ENTRY_MIN_DURATION_S = 8.0
+ENTRY_XY_TOLERANCE_CM = 0.08
+ENTRY_Z_TOLERANCE_CM = 0.05
+ENTRY_SETTLE_S = 1.0
+
 # ============================================================================
 # [REFERENCE 3D - HELIX] END
 # ============================================================================
@@ -146,6 +198,13 @@ _helix_finished_reported = False
 _wave_circle_elapsed_s = 0.0
 _wave_circle_valid_pair_count = 0
 _wave_circle_finished_reported = False
+
+_figure8_elapsed_s = 0.0
+_rectangle_elapsed_s = 0.0
+_butterfly_elapsed_s = 0.0
+_flower_elapsed_s = 0.0
+_entry_state = None
+_reference_mode_override = None
 
 
 def _validated_path_3d(path) -> np.ndarray:
@@ -329,7 +388,127 @@ def _build_wave_circle_path_3d() -> np.ndarray:
 _WAVE_CIRCLE_PATH_3D = _build_wave_circle_path_3d()
 
 
-def reset_reference_3d() -> None:
+def _validate_figure8_configuration() -> None:
+    values = (
+        FIGURE8_X_AMPLITUDE_CM, FIGURE8_Y_AMPLITUDE_CM,
+        FIGURE8_Z_START_CM, FIGURE8_Z_END_CM,
+        FIGURE8_PERIOD_S, FIGURE8_CYCLES, FIGURE8_OVERLAY_POINTS,
+    )
+    if not all(np.isfinite(float(value)) for value in values):
+        raise ValueError("FIGURE8 configuration must be finite")
+    if min(FIGURE8_X_AMPLITUDE_CM, FIGURE8_Y_AMPLITUDE_CM,
+           FIGURE8_PERIOD_S, FIGURE8_CYCLES) <= 0:
+        raise ValueError("Figure-eight amplitudes, period and cycles must be positive")
+    if not 0 <= FIGURE8_Z_START_CM < FIGURE8_Z_END_CM:
+        raise ValueError("Figure-eight Z end must exceed its nonnegative start")
+    if int(FIGURE8_OVERLAY_POINTS) < 2:
+        raise ValueError("FIGURE8_OVERLAY_POINTS must be >= 2")
+
+
+def _figure8_coordinates(theta) -> np.ndarray:
+    return np.stack((
+        FIGURE8_X_AMPLITUDE_CM * np.sin(theta),
+        FIGURE8_Y_AMPLITUDE_CM * np.sin(2.0 * theta),
+        FIGURE8_Z_START_CM + (FIGURE8_Z_END_CM - FIGURE8_Z_START_CM)
+        * theta / (2.0 * np.pi * FIGURE8_CYCLES),
+    ), axis=-1)
+
+
+def _build_figure8_path_3d() -> np.ndarray:
+    _validate_figure8_configuration()
+    theta = np.linspace(0.0, 2.0 * np.pi * FIGURE8_CYCLES,
+                        int(FIGURE8_OVERLAY_POINTS))
+    path = _figure8_coordinates(theta)
+    path.setflags(write=False)
+    return path
+
+
+_FIGURE8_PATH_3D = _build_figure8_path_3d()
+
+
+def _validate_rectangle_configuration() -> None:
+    values = (RECT_X_HALF_CM, RECT_Y_HALF_CM, RECT_Z_START_CM,
+              RECT_Z_END_CM, RECT_DURATION_S, RECT_ROUNDNESS, RECT_OVERLAY_POINTS)
+    if not all(np.isfinite(float(v)) for v in values):
+        raise ValueError("Rectangle configuration must be finite")
+    if min(RECT_X_HALF_CM, RECT_Y_HALF_CM, RECT_DURATION_S, RECT_ROUNDNESS) <= 0:
+        raise ValueError("Rectangle dimensions, duration and roundness must be positive")
+    if not 0 <= RECT_Z_START_CM < RECT_Z_END_CM or int(RECT_OVERLAY_POINTS) < 2:
+        raise ValueError("Rectangle needs ascending Z bounds and at least two points")
+
+
+def _rectangle_coordinates(progress) -> np.ndarray:
+    theta = 2.0 * np.pi * progress
+    return np.stack((
+        RECT_X_HALF_CM * np.tanh(RECT_ROUNDNESS * np.cos(theta)) / np.tanh(RECT_ROUNDNESS),
+        RECT_Y_HALF_CM * np.tanh(RECT_ROUNDNESS * np.sin(theta)) / np.tanh(RECT_ROUNDNESS),
+        RECT_Z_START_CM + (RECT_Z_END_CM - RECT_Z_START_CM) * progress,
+    ), axis=-1)
+
+
+_validate_rectangle_configuration()
+_RECTANGLE_PATH_3D = _rectangle_coordinates(np.linspace(0., 1., int(RECT_OVERLAY_POINTS)))
+_RECTANGLE_PATH_3D.setflags(write=False)
+
+
+def _validate_butterfly_configuration() -> None:
+    values = (BUTTERFLY_X_AMPLITUDE_CM, BUTTERFLY_Y_AMPLITUDE_CM,
+              BUTTERFLY_Z_START_CM, BUTTERFLY_Z_END_CM,
+              BUTTERFLY_DURATION_S, BUTTERFLY_OVERLAY_POINTS)
+    if not all(np.isfinite(float(v)) for v in values):
+        raise ValueError("Butterfly configuration must be finite")
+    if min(BUTTERFLY_X_AMPLITUDE_CM, BUTTERFLY_Y_AMPLITUDE_CM, BUTTERFLY_DURATION_S) <= 0:
+        raise ValueError("Butterfly amplitudes and duration must be positive")
+    if not 0 <= BUTTERFLY_Z_START_CM < BUTTERFLY_Z_END_CM or int(BUTTERFLY_OVERLAY_POINTS) < 2:
+        raise ValueError("Butterfly needs ascending Z bounds and at least two points")
+
+
+def _butterfly_coordinates(progress) -> np.ndarray:
+    theta = 2.0 * np.pi * progress
+    return np.stack((
+        BUTTERFLY_X_AMPLITUDE_CM * np.sin(2.0 * theta),
+        BUTTERFLY_Y_AMPLITUDE_CM * np.sin(3.0 * theta),
+        BUTTERFLY_Z_START_CM + (BUTTERFLY_Z_END_CM - BUTTERFLY_Z_START_CM) * progress,
+    ), axis=-1)
+
+
+_validate_butterfly_configuration()
+_BUTTERFLY_PATH_3D = _butterfly_coordinates(np.linspace(0., 1., int(BUTTERFLY_OVERLAY_POINTS)))
+_BUTTERFLY_PATH_3D.setflags(write=False)
+
+
+def _validate_flower_configuration() -> None:
+    values = (FLOWER_X_RADIUS_CM, FLOWER_Y_RADIUS_CM, FLOWER_Z_START_CM,
+              FLOWER_Z_END_CM, FLOWER_DURATION_S, FLOWER_PETALS,
+              FLOWER_PETAL_DEPTH, FLOWER_OVERLAY_POINTS)
+    if not all(np.isfinite(float(v)) for v in values):
+        raise ValueError("Flower configuration must be finite")
+    if min(FLOWER_X_RADIUS_CM, FLOWER_Y_RADIUS_CM, FLOWER_DURATION_S) <= 0:
+        raise ValueError("Flower radii and duration must be positive")
+    if not 0 <= FLOWER_Z_START_CM < FLOWER_Z_END_CM:
+        raise ValueError("Flower Z must ascend from a nonnegative height")
+    if not 0 < FLOWER_PETAL_DEPTH < 1 or int(FLOWER_OVERLAY_POINTS) < 2:
+        raise ValueError("Flower depth must be between 0 and 1 with at least two points")
+    if int(FLOWER_PETALS) != FLOWER_PETALS or FLOWER_PETALS < 2:
+        raise ValueError("Flower petal count must be an integer >= 2")
+
+
+def _flower_coordinates(progress) -> np.ndarray:
+    theta = 2.0 * np.pi * progress
+    radius = (1.0 + FLOWER_PETAL_DEPTH * np.cos(FLOWER_PETALS * theta)) / (1.0 + FLOWER_PETAL_DEPTH)
+    return np.stack((
+        FLOWER_X_RADIUS_CM * radius * np.cos(theta),
+        FLOWER_Y_RADIUS_CM * radius * np.sin(theta),
+        FLOWER_Z_START_CM + (FLOWER_Z_END_CM - FLOWER_Z_START_CM) * progress,
+    ), axis=-1)
+
+
+_validate_flower_configuration()
+_FLOWER_PATH_3D = _flower_coordinates(np.linspace(0., 1., int(FLOWER_OVERLAY_POINTS)))
+_FLOWER_PATH_3D.setflags(write=False)
+
+
+def reset_reference_3d(mode_override=None) -> None:
     """Reset the 3D reference sequence to its initial state."""
 
     global _step_index
@@ -340,6 +519,11 @@ def reset_reference_3d() -> None:
     global _wave_circle_elapsed_s
     global _wave_circle_valid_pair_count
     global _wave_circle_finished_reported
+    global _figure8_elapsed_s
+    global _rectangle_elapsed_s, _entry_state
+    global _reference_mode_override
+    global _butterfly_elapsed_s
+    global _flower_elapsed_s
 
     _step_index = 0
     _step_valid_pair_count = 0
@@ -349,12 +533,21 @@ def reset_reference_3d() -> None:
     _wave_circle_elapsed_s = 0.0
     _wave_circle_valid_pair_count = 0
     _wave_circle_finished_reported = False
+    _figure8_elapsed_s = 0.0
+    _rectangle_elapsed_s = 0.0
+    _butterfly_elapsed_s = 0.0
+    _flower_elapsed_s = 0.0
+    _entry_state = None
+    _reference_mode_override = mode_override
+    if (_reference_mode_override or REFERENCE_MODE_3D) == 'rrt_navigation':
+        from navigation.reference import reset_navigation
+        reset_navigation()
 
 
 def reference_parameter_snapshot_3d() -> Dict[str, Any]:
     """Return reference-generator parameters for experiment PKL snapshots."""
     return {
-        "REFERENCE_MODE_3D": str(REFERENCE_MODE_3D),
+        "REFERENCE_MODE_3D": str(_reference_mode_override or REFERENCE_MODE_3D),
         "STEP_HOLD_VALID_PAIRS": int(STEP_HOLD_VALID_PAIRS),
         "STEP_LOOP": bool(STEP_LOOP),
         "HELIX_CENTER_X_CM": float(HELIX_CENTER_X_CM),
@@ -376,13 +569,49 @@ def reference_parameter_snapshot_3d() -> Dict[str, Any]:
         "WAVE_CIRCLE_PERIOD_S": float(WAVE_CIRCLE_PERIOD_S),
         "WAVE_CIRCLE_TURNS": float(WAVE_CIRCLE_TURNS),
         "WAVE_CIRCLE_OVERLAY_POINTS": int(WAVE_CIRCLE_OVERLAY_POINTS),
+        "FIGURE8_X_AMPLITUDE_CM": float(FIGURE8_X_AMPLITUDE_CM),
+        "FIGURE8_Y_AMPLITUDE_CM": float(FIGURE8_Y_AMPLITUDE_CM),
+        "FIGURE8_Z_START_CM": float(FIGURE8_Z_START_CM),
+        "FIGURE8_Z_END_CM": float(FIGURE8_Z_END_CM),
+        "FIGURE8_PERIOD_S": float(FIGURE8_PERIOD_S),
+        "FIGURE8_CYCLES": float(FIGURE8_CYCLES),
+        "FIGURE8_OVERLAY_POINTS": int(FIGURE8_OVERLAY_POINTS),
+        "RECT_X_HALF_CM": float(RECT_X_HALF_CM),
+        "RECT_Y_HALF_CM": float(RECT_Y_HALF_CM),
+        "RECT_Z_START_CM": float(RECT_Z_START_CM),
+        "RECT_Z_END_CM": float(RECT_Z_END_CM),
+        "RECT_DURATION_S": float(RECT_DURATION_S),
+        "RECT_ROUNDNESS": float(RECT_ROUNDNESS),
+        "RECT_OVERLAY_POINTS": int(RECT_OVERLAY_POINTS),
+        "BUTTERFLY_X_AMPLITUDE_CM": float(BUTTERFLY_X_AMPLITUDE_CM),
+        "BUTTERFLY_Y_AMPLITUDE_CM": float(BUTTERFLY_Y_AMPLITUDE_CM),
+        "BUTTERFLY_Z_START_CM": float(BUTTERFLY_Z_START_CM),
+        "BUTTERFLY_Z_END_CM": float(BUTTERFLY_Z_END_CM),
+        "BUTTERFLY_DURATION_S": float(BUTTERFLY_DURATION_S),
+        "BUTTERFLY_OVERLAY_POINTS": int(BUTTERFLY_OVERLAY_POINTS),
+        "FLOWER_X_RADIUS_CM": float(FLOWER_X_RADIUS_CM),
+        "FLOWER_Y_RADIUS_CM": float(FLOWER_Y_RADIUS_CM),
+        "FLOWER_Z_START_CM": float(FLOWER_Z_START_CM),
+        "FLOWER_Z_END_CM": float(FLOWER_Z_END_CM),
+        "FLOWER_DURATION_S": float(FLOWER_DURATION_S),
+        "FLOWER_PETALS": int(FLOWER_PETALS),
+        "FLOWER_PETAL_DEPTH": float(FLOWER_PETAL_DEPTH),
+        "FLOWER_OVERLAY_POINTS": int(FLOWER_OVERLAY_POINTS),
+        "ENTRY_ENABLED": bool(ENTRY_ENABLED),
+        "ENTRY_XY_SPEED_CM_S": float(ENTRY_XY_SPEED_CM_S),
+        "ENTRY_Z_SPEED_CM_S": float(ENTRY_Z_SPEED_CM_S),
+        "ENTRY_MIN_DURATION_S": float(ENTRY_MIN_DURATION_S),
+        "ENTRY_XY_TOLERANCE_CM": float(ENTRY_XY_TOLERANCE_CM),
+        "ENTRY_Z_TOLERANCE_CM": float(ENTRY_Z_TOLERANCE_CM),
+        "ENTRY_SETTLE_S": float(ENTRY_SETTLE_S),
     }
 
 
-def get_reference_3d(
+def _get_main_reference_3d(
     *,
     advance: bool,
     dt_s: float = 0.0,
+    current_position_cm=None,
 ) -> Tuple[np.ndarray, np.ndarray, Dict[str, Any]]:
     """Return the current 3D reference.
 
@@ -398,7 +627,7 @@ def get_reference_3d(
             Advance step counter or continuous trajectory time once.
 
     dt_s:
-        Used by helix / wave_circle modes when ``advance=True``.
+        Used by helix / wave_circle / spatial_figure8 when ``advance=True``.
         Ignored by fixed / step modes.
 
     Notes
@@ -416,8 +645,16 @@ def get_reference_3d(
     global _wave_circle_elapsed_s
     global _wave_circle_valid_pair_count
     global _wave_circle_finished_reported
+    global _figure8_elapsed_s
+    global _rectangle_elapsed_s
+    global _butterfly_elapsed_s
+    global _flower_elapsed_s
 
-    mode = str(REFERENCE_MODE_3D).strip().lower()
+    mode = str(_reference_mode_override or REFERENCE_MODE_3D).strip().lower()
+    if mode == 'rrt_navigation':
+        from navigation.reference import get_navigation_reference
+        return get_navigation_reference(advance=advance, dt_s=dt_s,
+                                        current_position_cm=current_position_cm)
 
     # ------------------------------------------------------------------------
     # Fixed reference mode
@@ -585,8 +822,133 @@ def get_reference_3d(
             print("[REFERENCE 3D WAVE_CIRCLE FINISHED] Holding final target.")
         return target_xyz, _WAVE_CIRCLE_PATH_3D, info
 
+    if mode == "spatial_figure8":
+        _validate_figure8_configuration()
+        if advance:
+            dt = float(dt_s)
+            if not np.isfinite(dt) or dt < 0.0:
+                raise ValueError(f"dt_s must be finite and >= 0, got {dt_s!r}")
+            _figure8_elapsed_s += dt
+        duration_s = float(FIGURE8_PERIOD_S * FIGURE8_CYCLES)
+        progress = float(np.clip(_figure8_elapsed_s / duration_s, 0.0, 1.0))
+        theta = 2.0 * np.pi * FIGURE8_CYCLES * progress
+        target_xyz = _figure8_coordinates(theta)
+        info = {
+            "mode": "spatial_figure8",
+            "elapsed_s": float(_figure8_elapsed_s),
+            "duration_s": duration_s,
+            "progress": progress,
+            "theta_rad": float(theta),
+            "completed_cycles": float(FIGURE8_CYCLES * progress),
+            "finished": bool(progress >= 1.0),
+        }
+        return target_xyz, _FIGURE8_PATH_3D, info
+
+    if mode == "rising_rounded_rectangle":
+        _validate_rectangle_configuration()
+        if advance:
+            dt = float(dt_s)
+            if not np.isfinite(dt) or dt < 0:
+                raise ValueError("dt_s must be finite and nonnegative")
+            _rectangle_elapsed_s += dt
+        progress = float(np.clip(_rectangle_elapsed_s / RECT_DURATION_S, 0., 1.))
+        return _rectangle_coordinates(progress), _RECTANGLE_PATH_3D, {
+            "mode": mode, "elapsed_s": _rectangle_elapsed_s,
+            "duration_s": RECT_DURATION_S, "progress": progress,
+            "finished": progress >= 1.,
+        }
+
+    if mode == "rising_butterfly":
+        _validate_butterfly_configuration()
+        if advance:
+            dt = float(dt_s)
+            if not np.isfinite(dt) or dt < 0:
+                raise ValueError("dt_s must be finite and nonnegative")
+            _butterfly_elapsed_s += dt
+        progress = float(np.clip(_butterfly_elapsed_s / BUTTERFLY_DURATION_S, 0., 1.))
+        return _butterfly_coordinates(progress), _BUTTERFLY_PATH_3D, {
+            "mode": mode, "elapsed_s": _butterfly_elapsed_s,
+            "duration_s": BUTTERFLY_DURATION_S, "progress": progress,
+            "finished": progress >= 1.,
+        }
+
+    if mode == "rising_flower":
+        _validate_flower_configuration()
+        if advance:
+            dt = float(dt_s)
+            if not np.isfinite(dt) or dt < 0:
+                raise ValueError("dt_s must be finite and nonnegative")
+            _flower_elapsed_s += dt
+        progress = float(np.clip(_flower_elapsed_s / FLOWER_DURATION_S, 0., 1.))
+        return _flower_coordinates(progress), _FLOWER_PATH_3D, {
+            "mode": mode, "elapsed_s": _flower_elapsed_s,
+            "duration_s": FLOWER_DURATION_S, "progress": progress,
+            "finished": progress >= 1.,
+        }
+
     raise ValueError(
         "Unsupported REFERENCE_MODE_3D: "
         f"{REFERENCE_MODE_3D!r}. "
-        "Supported modes are 'fixed', 'step', 'helix', and 'wave_circle'."
+        "Supported modes: fixed, step, helix, wave_circle, spatial_figure8, rising_rounded_rectangle, rising_butterfly, rising_flower."
     )
+
+
+def get_reference_3d(*, advance: bool, dt_s: float = 0.0,
+                     current_position_cm=None) -> Tuple[np.ndarray, np.ndarray, Dict[str, Any]]:
+    """Shared XYZ reference including a smooth measured-position entry tail.
+
+    The main trajectory clock stays paused until the bead has reached its
+    first point and remained within the configured tolerances for one second.
+    Calling without a measured position preserves the standalone reference API.
+    """
+    global _entry_state
+    dt = float(dt_s)
+    if advance and (not np.isfinite(dt) or dt < 0):
+        raise ValueError("dt_s must be finite and nonnegative")
+    current = None
+    if current_position_cm is not None:
+        current = np.asarray(current_position_cm, dtype=float).reshape(3).copy()
+        if not np.all(np.isfinite(current)):
+            raise ValueError("Entry measurement must be finite")
+
+    just_started = False
+    if ENTRY_ENABLED and advance and current is not None and _entry_state is None:
+        values = (ENTRY_XY_SPEED_CM_S, ENTRY_Z_SPEED_CM_S, ENTRY_MIN_DURATION_S,
+                  ENTRY_XY_TOLERANCE_CM, ENTRY_Z_TOLERANCE_CM, ENTRY_SETTLE_S)
+        if not all(np.isfinite(v) and v > 0 for v in values):
+            raise ValueError("Entry speeds, tolerances and durations must be positive")
+        first, path, _ = _get_main_reference_3d(advance=False)
+        delta = first - current
+        # Quintic smoothstep has a maximum derivative of 1.875.
+        duration = max(ENTRY_MIN_DURATION_S,
+                       1.875 * np.linalg.norm(delta[:2]) / ENTRY_XY_SPEED_CM_S,
+                       1.875 * abs(delta[2]) / ENTRY_Z_SPEED_CM_S)
+        # Render only the main shape; the entry tail is used for control only.
+        _entry_state = dict(start=current, first=first.copy(), duration=duration,
+                            elapsed=0., stable=0., finished=False, path=path)
+        just_started = True
+
+    entry = _entry_state if ENTRY_ENABLED else None
+    if entry is not None and not entry['finished']:
+        if advance and not just_started:
+            entry['elapsed'] = min(entry['duration'], entry['elapsed'] + dt)
+        progress = entry['elapsed'] / entry['duration']
+        blend = progress**3 * (10. - 15.*progress + 6.*progress**2)
+        target = entry['start'] + blend * (entry['first'] - entry['start'])
+        if advance and current is not None:
+            error = entry['first'] - current
+            reached = (progress >= 1. and np.linalg.norm(error[:2]) <= ENTRY_XY_TOLERANCE_CM
+                       and abs(error[2]) <= ENTRY_Z_TOLERANCE_CM)
+            entry['stable'] = entry['stable'] + dt if reached else 0.
+            entry['finished'] = entry['stable'] >= ENTRY_SETTLE_S
+        return target, entry['path'], {
+            'mode': str(_reference_mode_override or REFERENCE_MODE_3D), 'phase': 'entry',
+            'elapsed_s': entry['elapsed'], 'duration_s': entry['duration'],
+            'progress': progress, 'finished': False,
+            'entry_complete': entry['finished'],
+        }
+
+    target, path, info = _get_main_reference_3d(advance=advance, dt_s=dt_s,
+                                              current_position_cm=current)
+    info = dict(info, phase='tracking')
+    return target, entry['path'] if entry is not None else path, info

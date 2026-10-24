@@ -116,12 +116,14 @@ class OverlayRenderer:
         circle_position: Sequence[int],
         px_per_cm: float,
         ref_path_3d: Any,
+        navigation_scene=None,
     ) -> None:
         path = None if ref_path_3d is None else np.asarray(ref_path_3d, dtype=float)
         # [3D_PID] 路径由模式验证为只读，并在内容变化时整体替换，因此可用对象
         # 身份做 O(1) 缓存键；只有路径、标定、画面尺寸变化时才重建静态层。
         path_key = None if path is None or path.size == 0 else (id(ref_path_3d), path.shape)
         key = (
+            id(navigation_scene),
             int(frame_shape[0]),
             int(frame_shape[1]),
             int(circle_position[0]),
@@ -136,6 +138,12 @@ class OverlayRenderer:
         self.static_overlay_mask = np.zeros((height, width), dtype=np.uint8)
         self.trace_overlay_bgr = np.zeros((height, width, 3), dtype=np.uint8)
         self.trace_overlay_mask = np.zeros((height, width), dtype=np.uint8)
+        if navigation_scene is not None:
+            from vision.navigation_overlay import draw_navigation_scene
+            draw_navigation_scene(
+                self.static_overlay_bgr, self.static_overlay_mask, navigation_scene,
+                lambda points: self.project_path_3d_to_top_pixels(points, circle_position, px_per_cm),
+            )
         pixels = self.project_path_3d_to_top_pixels(
             ref_path_3d, circle_position, px_per_cm
         )
@@ -248,10 +256,12 @@ class OverlayRenderer:
         # [3D_PID] 由 ModeManager.get_overlay_state() 提供，仅用于绘图。
         target_xyz: Any = None,
         ref_path_3d: Any = None,
+        draw_trace: bool = True,
+        navigation_scene=None,
     ) -> np.ndarray:
         """绘制当前模式的参考投影、有效测量轨迹、中心、ROI 与目标。"""
         # 三维模式绘制 XY 参考投影和有效 pair 轨迹。
-        if control_mode == "stabilize_3d_mode":
+        if control_mode in ("stabilize_3d_mode", "navigate_3d_mode", "static_obstacle_3d_mode", "slalom_3d_mode"):
             if circle_position is None or not circle_state:
                 return frame_show
             self._ensure_stabilize_layers(
@@ -259,6 +269,7 @@ class OverlayRenderer:
                 circle_position,
                 px_per_cm,
                 ref_path_3d,
+                navigation_scene,
             )
             if motion_state:
                 if not self.stabilize_was_motion_active:
@@ -268,9 +279,13 @@ class OverlayRenderer:
                     self.stabilize_last_pair_id = getattr(
                         magnetic_model, "measurement_pair_id", None
                     )
-                self._append_stabilize_trace(
-                    magnetic_model, circle_position, px_per_cm
-                )
+                if draw_trace:
+                    self._append_stabilize_trace(
+                        magnetic_model, circle_position, px_per_cm
+                    )
+                else:
+                    self.stabilize_last_trace_pixel = None
+                    self.stabilize_last_pair_id = getattr(magnetic_model, "measurement_pair_id", None)
             self.stabilize_was_motion_active = bool(motion_state)
             frame_show = self._blend_overlays(frame_show)
             self._draw_robot_centers(frame_show, robot_centers_px)

@@ -26,6 +26,9 @@ from app.vision_control_loop import VisionControlLoop, VisionControlLoopConfig
 # 当前仅注册三维模式，保留映射和下拉框以便后续扩展。
 MODE_NAME_MAP = {
     "stabilize_3d_mode": "stabilize_3d",
+    "navigate_3d_mode": "navigate_3d",
+    "static_obstacle_3d_mode": "static_obstacle_3d",
+    "slalom_3d_mode": "slalom_3d",
 }
 # [3D_PID] END: UI/内部模式映射。
 
@@ -33,6 +36,15 @@ MODE_NAME_MAP = {
 # 主流程通过当前模式的 save_motion_log() 保存实验数据。
 MODE_PKL_FILENAME_MAP = {
     "stabilize_3d": "stabilize_3d_data.pkl",
+    "navigate_3d": "navigate_3d_data.pkl",
+    "static_obstacle_3d": "static_obstacle_3d_data.pkl",
+    "slalom_3d": "slalom_3d_data.pkl",
+}
+
+NAVIGATION_SCENE_BY_MODE = {
+    'navigate_3d_mode': 'vessels',
+    'static_obstacle_3d_mode': 'static_obstacles',
+    'slalom_3d_mode': 'slalom',
 }
 
 EXPERIMENT_RECORD_ROOT = Path("recordings")
@@ -82,8 +94,8 @@ roi_w = 185        # 宽
 
 # ============== 本次视觉修改【上视参数】：面积初值开始 ==============
 # 作用：配合两路统一预处理，改用未腐蚀暗珠前景的面积；重新标定前须在候选窗确认。
-min_area = 10   # 轮廓面积下限（px²）；覆盖 DetectorConfig 默认值
-max_area = 200   # 轮廓面积上限（px²）；适当放宽，避免约 12 px 磁珠轮廓被误筛
+min_area = 20   # 轮廓面积下限（px²）；覆盖 DetectorConfig 默认值
+max_area = 300   # 轮廓面积上限（px²）；适当放宽，避免约 12 px 磁珠轮廓被误筛
 # ============== 本次视觉修改【上视参数】：面积初值结束 ==============
 Camera_index = 0
 
@@ -177,7 +189,7 @@ class WinForm(QtWidgets.QWidget, Ui_Form):
         }
         self.devices = DeviceManager(cfg=self.cfg)
         self.runtime_ctx = create_runtime_context(cfg=self.cfg, devices=self.devices)
-        self.control_mode = "stabilize_3d_mode"
+        self.control_mode = "navigate_3d_mode"
         self.mode_manager = ModeManager(self.runtime_ctx)
         self.mode_manager.switch_mode(MODE_NAME_MAP.get(self.control_mode, "stabilize_3d"))
 
@@ -266,13 +278,20 @@ class WinForm(QtWidgets.QWidget, Ui_Form):
             self.comboBox_remote_mode.setObjectName("comboBox_remote_mode")
             # 当前只显示三维模式，回调和切换生命周期继续保留。
             self.comboBox_remote_mode.addItem("stabilize_3d_mode")
-            self.comboBox_remote_mode.setCurrentIndex(0)
+            self.comboBox_remote_mode.addItem("navigate_3d_mode")
+            self.comboBox_remote_mode.addItem("static_obstacle_3d_mode")
+            self.comboBox_remote_mode.addItem("slalom_3d_mode")
+            self.comboBox_remote_mode.setCurrentIndex(1)
         except Exception as e:
             print(f"[WARN][REMOTE_STEP2] create remote mode combo failed: {e}")
             self.comboBox_remote_mode = None
 
         if self.comboBox_remote_mode is not None:
             self.comboBox_remote_mode.currentIndexChanged.connect(self.on_remote_mode_changed)
+        self._navigation_window = None
+        self.button_navigation_scene = QtWidgets.QPushButton('三维导航场景', self)
+        self.button_navigation_scene.setGeometry(QtCore.QRect(700, 45, 180, 30))
+        self.button_navigation_scene.clicked.connect(self._show_navigation_window)
         # ===== 模式选择结束 =====
 
         # ==================== 泵相关：测试按钮绑定开始 ====================
@@ -341,9 +360,30 @@ class WinForm(QtWidgets.QWidget, Ui_Form):
         # 把新模式放在末尾可避免改变旧模式已有索引及默认行为。
         modes = [
             "stabilize_3d_mode",
+            "navigate_3d_mode",
+            "static_obstacle_3d_mode",
+            "slalom_3d_mode",
         ]
         idx = int(idx)
         idx = max(0, min(idx, len(modes) - 1))
+        previous_mode = self.control_mode
+        if modes[idx] != previous_mode and not self._navigation_can_replan():
+            with QtCore.QSignalBlocker(self.comboBox_remote_mode):
+                self.comboBox_remote_mode.setCurrentIndex(modes.index(previous_mode))
+            QtWidgets.QMessageBox.information(self, '切换模式', '请先停止当前实验，再切换模式。')
+            return
+        if modes[idx] in NAVIGATION_SCENE_BY_MODE:
+            from navigation import reference
+            previous_scene = reference.SCENE_KIND
+            try:
+                reference.SCENE_KIND = NAVIGATION_SCENE_BY_MODE[modes[idx]]
+                reference.get_navigation()
+            except Exception as exc:
+                reference.SCENE_KIND = previous_scene
+                with QtCore.QSignalBlocker(self.comboBox_remote_mode):
+                    self.comboBox_remote_mode.setCurrentIndex(modes.index(previous_mode))
+                QtWidgets.QMessageBox.warning(self, 'RRT 规划失败', str(exc))
+                return
         self.control_mode = modes[idx]
         print(f"[REMOTE_STEP2] control_mode set to: {self.control_mode}")
         # [3D_PID] END: 模式下拉索引映射。
@@ -356,6 +396,53 @@ class WinForm(QtWidgets.QWidget, Ui_Form):
             print(f"[REFACTOR_PHASE5] mode_manager switched to: {mode_key}")
         # ===== 【REFACTOR_PHASE5】通过 ModeManager 切换运动模式：结束 =====
 
+
+    def _navigation_can_replan(self):
+        return not (self._is_motion_active() or self._motion_start_pending
+                    or self._video_recording_active or self._experiment_stop_pending)
+
+    def _navigation_state(self):
+        state = self.mode_manager.get_overlay_state()
+        model = self.runtime_ctx.magnetic_model
+        state.update(
+            motion_active=self._is_motion_active(),
+            position_xyz=np.asarray(model.return_position(), float).reshape(3).copy(),
+            valid_mask=np.asarray(model.measurement_valid_mask, bool).copy(),
+            pair_id=getattr(model, 'measurement_pair_id', None),
+        )
+        return state
+
+    def _navigation_replan(self, goal_index):
+        if not self._navigation_can_replan():
+            return
+        from navigation import reference
+        previous = reference.GOAL_BRANCH
+        try:
+            reference.GOAL_BRANCH = int(goal_index)
+            reference.get_navigation()
+        except Exception:
+            reference.GOAL_BRANCH = previous
+            raise
+        self.mode_manager.switch_mode(MODE_NAME_MAP[self.control_mode])
+        self.reset_overlay_layers()
+
+    def _show_navigation_window(self):
+        if self.control_mode not in NAVIGATION_SCENE_BY_MODE:
+            if not self._navigation_can_replan():
+                QtWidgets.QMessageBox.information(self, '切换导航模式', '请先停止当前实验，再打开导航场景。')
+                return
+            self.comboBox_remote_mode.setCurrentIndex(1)
+            if self.control_mode not in NAVIGATION_SCENE_BY_MODE:
+                return
+        if self._navigation_window is None:
+            from navigation.viewer import NavigationWindow
+            self._navigation_window = NavigationWindow(
+                get_state=self._navigation_state, replan=self._navigation_replan,
+                can_replan=self._navigation_can_replan, parent=self,
+            )
+        self._navigation_window.refresh()
+        self._navigation_window.show()
+        self._navigation_window.raise_()
 
     def reset_overlay_layers(self):
         self.overlay_renderer.reset()

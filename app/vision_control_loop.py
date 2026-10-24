@@ -91,6 +91,7 @@ class VisionControlLoopConfig:
     # ----- 【双视·共用】UI 占位图尺寸（侧视离线/缺帧时用）-----
     display_width: int = 640
     display_height: int = 360
+    navigation_matched_metric_views: bool = True
 
     # ----- 【侧视】海康 Mono8 相机与检测参数 -----
     side_camera_enabled: bool = True
@@ -493,6 +494,41 @@ class VisionControlLoop:
                     xy_valid = False
                     xy_cm = None
 
+        if not xy_valid and top_result is not None and self.is_motion_active():
+            top_cfg = self.robot_detector.cfg
+            areas = getattr(top_result, "contour_areas_px2", ())
+            accepted = [a for a in areas if top_cfg.min_area < a < top_cfg.max_area]
+            count = int(getattr(top_result, "filtered_contour_count", 0))
+            if getattr(top_result, "scene_just_initialized", False):
+                reason = "scene_initializing"
+            elif not areas:
+                reason = "no_contours_after_threshold_and_roi"
+            elif count == 0:
+                reason = "all_contours_outside_area_range"
+            elif count > 1:
+                reason = "multiple_candidates"
+            else:
+                reason = "missing_or_nonfinite_xy"
+            diagnostic = (
+                f"[TOP LOST] pair={pair_id} reason={reason} "
+                f"timestamp_s={float(top_timestamp):.6f} "
+                f"raw_contours_px2={[round(a, 1) for a in areas]} "
+                f"accepted_px2={[round(a, 1) for a in accepted]} "
+                f"candidates={count} range=({top_cfg.min_area},{top_cfg.max_area}) "
+                f"threshold={top_cfg.threshold}"
+            )
+            session_info = self.get_experiment_session_info() or {}
+            log_dir = Path(session_info.get("session_dir") or "recordings")
+            try:
+                log_dir.mkdir(parents=True, exist_ok=True)
+                with (log_dir / "top_detection_loss.txt").open(
+                    "a", encoding="utf-8"
+                ) as log_file:
+                    log_file.write(diagnostic + "\n")
+            except OSError as exc:
+                # A diagnostic write failure must not interrupt coil control.
+                self._top_detection_log_error = str(exc)
+
         # ----- z 有效条件（侧视标定完成 + 配对时差可接受）-----
         z_valid = False
         z_cm = None
@@ -856,7 +892,7 @@ class VisionControlLoop:
 
     @staticmethod
     def _resize_bgr(frame: Optional[np.ndarray], width: int, height: int) -> np.ndarray:
-        """将 BGR 帧缩放到固定显示尺寸；空帧则返回黑图。"""
+        """等比例缩放并补黑边，避免录像将不同宽高比的相机画面压扁。"""
         if frame is None:
             return np.zeros((int(height), int(width), 3), dtype=np.uint8)
         arr = np.asarray(frame)
@@ -864,7 +900,13 @@ class VisionControlLoop:
             arr = cv2.cvtColor(arr, cv2.COLOR_GRAY2BGR)
         if arr.shape[0] == int(height) and arr.shape[1] == int(width):
             return arr
-        return cv2.resize(arr, (int(width), int(height)), interpolation=cv2.INTER_AREA)
+        scale = min(width/arr.shape[1], height/arr.shape[0])
+        new_w = max(1, int(round(arr.shape[1]*scale)))
+        new_h = max(1, int(round(arr.shape[0]*scale)))
+        canvas = np.zeros((int(height), int(width), 3), dtype=np.uint8)
+        x, y = (width-new_w)//2, (height-new_h)//2
+        canvas[y:y+new_h, x:x+new_w] = cv2.resize(arr, (new_w,new_h), interpolation=cv2.INTER_AREA)
+        return canvas
 
     def _compose_dual_view_frame(
         self,
@@ -1119,7 +1161,7 @@ class VisionControlLoop:
                 # side_result 必须是本轮真实侧视帧，缺帧占位图不追加旧 pair 轨迹。
                 overlay_state = self.runtime_loop.mode_manager.get_overlay_state()
                 if (
-                    self.get_control_mode() == "stabilize_3d_mode"
+                    self.get_control_mode() in ("stabilize_3d_mode", "navigate_3d_mode", "static_obstacle_3d_mode", "slalom_3d_mode")
                     and self.side_detector is not None
                     and side_result is not None
                     and frame_bundle.get("side_main") is not None
@@ -1131,6 +1173,8 @@ class VisionControlLoop:
                         motion_active=bool(self.is_motion_active()),
                         target_xyz=overlay_state.get("target_xyz"),
                         ref_path_3d=overlay_state.get("ref_path_3d"),
+                        draw_trace=bool(overlay_state.get("draw_trace", True)),
+                        navigation_scene=overlay_state.get("navigation_scene"),
                     )
                 # [3D_PID] END: 侧视 yz 叠图。
 
@@ -1138,11 +1182,32 @@ class VisionControlLoop:
                     frame_bundle["top_main"] = frame_bundle["top_main"].copy()
                 if "side_main" in frame_bundle and frame_bundle["side_main"] is not None:
                     frame_bundle["side_main"] = frame_bundle["side_main"].copy()
+                # Draw at the original camera resolution so text uses the
+                # historical font/size, then resize with the rest of the view.
                 self._draw_dual_calibration_overlay(
                     top_main=frame_bundle.get("top_main"),
                     side_main=frame_bundle.get("side_main"),
                 )
-
+                scene = overlay_state.get('navigation_scene')
+                if (self.cfg.navigation_matched_metric_views and scene is not None
+                        and self.dual_calibration_result is not None
+                        and self.side_detector is not None
+                        and self.circle_position is not None):
+                    from vision.metric_views import matched_navigation_views
+                    if side_result is not None and frame_bundle.get('side_main') is not None:
+                        self._metric_side_frame_shape = frame_bundle['side_main'].shape
+                    metric_top, metric_side = matched_navigation_views(
+                        frame_bundle.get('top_main'),
+                        frame_bundle.get('side_main') if side_result is not None else None,
+                        scene=scene, top_origin=self.circle_position,
+                        top_px_per_cm=self.robot_detector.active_px_per_cm,
+                        side_detector=self.side_detector,
+                        width=int(self.cfg.display_width), height=int(self.cfg.display_height),
+                        side_frame_shape=getattr(self, '_metric_side_frame_shape', None),
+                    )
+                    frame_bundle['top_main'] = metric_top
+                    if metric_side is not None:
+                        frame_bundle['side_main'] = metric_side
                 # ----- 【录像】按 video_state 启停；路径由主线程实验会话提供 -----
                 video_requested = bool(self.is_video_enabled())
                 if video_requested and video_output is None:
@@ -1432,6 +1497,8 @@ class VisionControlLoop:
             control_mode=self.get_control_mode(),
             target_xyz=overlay_state.get("target_xyz"),
             ref_path_3d=overlay_state.get("ref_path_3d"),
+            draw_trace=bool(overlay_state.get("draw_trace", True)),
+            navigation_scene=overlay_state.get("navigation_scene"),
         )
         # [3D_PID] END: 上视 xy 叠图状态注入。
 

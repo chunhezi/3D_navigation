@@ -160,6 +160,7 @@ class RobotDetectionResult:
     calibration_observation: Optional[ViewCalibrationObservation] = None
     calibration_rejection_reason: Optional[str] = None
     filtered_contour_count: int = 0
+    contour_areas_px2: tuple[float, ...] = ()
     scale_calibrated: bool = False
     active_px_per_mm: float = 380.0 / 30.0
     # [3D] 原始上视 xy 测量（cm），shape=(2,1)；仅 filtered_contour_count==1 时非 None
@@ -437,6 +438,7 @@ class RobotDetector:
         contours, _hierarchy = cv2.findContours(
             eroded_for_contours, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
         )
+        result.contour_areas_px2 = tuple(float(cv2.contourArea(c)) for c in contours)
         # ============== 本次视觉修改【上视接入】：外轮廓提取结束 ==============
 
         # 有轮廓则生成调试图（即使后续面积筛选为空，也能在 UI 看到原因）
