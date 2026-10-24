@@ -97,12 +97,12 @@ class VisionControlLoopConfig:
     side_camera_index: int = 0
     side_camera_timeout_ms: int = 50
     side_roi_half_height: int = 100
-    side_roi_half_width: int = 200
+    side_roi_half_width: int = 100
     side_roi_center_offset_x: float = 0.0
     side_roi_center_offset_y: float = 0.0
     side_threshold: int = 80
     side_area_min: int = 20
-    side_area_max: int = 50 # 这边可以把max给打一下，磁珠前后的移动导致的放大
+    side_area_max: int = 350 # 这边可以把max给打一下，磁珠前后的移动导致的放大
     # 超过该值时在 side_main 叠加 PAIR DELAY WARNING（仍允许显示）
     side_pair_max_dt_ms: float = 80.0
     side_mvs_runtime_dir: Optional[str] = None

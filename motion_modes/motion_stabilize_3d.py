@@ -32,7 +32,7 @@ from motion_modes.base_motion import BaseMotionMode, MotionCommand, MotionObserv
 # [3D_PID] BEGIN: 目标、起点保持和未来三维参考路径入口。
 # Position unit: cm.  x=y=0 is RobotDetector.circle_position: the geometric
 # centre of the top-view image after first-frame scene calibration.
-TARGET_X_CM = 0.0
+TARGET_X_CM = 0.75
 TARGET_Y_CM = 0.0
 TARGET_Z_CM = 0.5
 

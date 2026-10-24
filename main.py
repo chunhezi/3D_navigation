@@ -83,7 +83,7 @@ roi_w = 185        # 宽
 # ============== 本次视觉修改【上视参数】：面积初值开始 ==============
 # 作用：配合两路统一预处理，改用未腐蚀暗珠前景的面积；重新标定前须在候选窗确认。
 min_area = 10   # 轮廓面积下限（px²）；覆盖 DetectorConfig 默认值
-max_area = 100   # 轮廓面积上限（px²）；不再沿用腐蚀后黑孔的 450～600
+max_area = 200   # 轮廓面积上限（px²）；适当放宽，避免约 12 px 磁珠轮廓被误筛
 # ============== 本次视觉修改【上视参数】：面积初值结束 ==============
 Camera_index = 0
 
@@ -166,7 +166,7 @@ class WinForm(QtWidgets.QWidget, Ui_Form):
             "top_calibration_diameter_min_px": 5.0,
             "top_calibration_diameter_max_px": 35.0,
             "top_calibration_circularity_min": 0.40,
-            "side_calibration_diameter_min_px": 8.0,
+            "side_calibration_diameter_min_px": 4.0,
             "side_calibration_diameter_max_px": 20.0,
             "side_calibration_circularity_min": 0.30,
             "side_threshold": 90,

@@ -27,6 +27,9 @@ import numpy as np
 # KP_X = 1.6e-5
 # KP_Y = 1.5e-5
 # KP_Z = 1e-5
+#KP_X = 8e-6
+#KP_Y = 8e-6
+#KP_Z = 2e-5
 
 KP_X = 8e-6
 KP_Y = 8e-6

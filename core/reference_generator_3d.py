@@ -13,6 +13,7 @@ Current implementation:
     - fixed 3D reference
     - discrete step reference
     - time-parameterized helix reference
+    - wave circle reference (two height oscillations per circle)
     - no arrival detection
     - no interpolation / carrot / look-ahead
 
@@ -36,12 +37,13 @@ import numpy as np
 #   "fixed"
 #   "step"
 #   "helix"
-REFERENCE_MODE_3D = "helix"
+#   "wave_circle" (起伏圆)
+REFERENCE_MODE_3D = "wave_circle"
 
 
 # Fixed reference, used only when REFERENCE_MODE_3D == "fixed".
 FIXED_TARGET_3D_CM = np.array(
-    [0.0, 0.0, 0.5],
+    [0.75, 0.0, 0.5],
     dtype=float,
 )
 
@@ -110,6 +112,17 @@ HELIX_OVERLAY_POINTS = 361
 # Hold the final point after the trajectory is completed.
 HELIX_HOLD_FINAL = True
 
+# Wave circle (起伏圆): x=r*cos(theta), y=r*sin(theta),
+# z=z_center+z_amplitude*sin(2*theta). Hold the endpoint after two circles.
+WAVE_CIRCLE_CENTER_X_CM = 0.0
+WAVE_CIRCLE_CENTER_Y_CM = 0.0
+WAVE_CIRCLE_RADIUS_CM = 1.0
+WAVE_CIRCLE_Z_CENTER_CM = 0.5
+WAVE_CIRCLE_Z_AMPLITUDE_CM = 0.1
+WAVE_CIRCLE_PERIOD_S = 40.0
+WAVE_CIRCLE_TURNS = 2.0
+WAVE_CIRCLE_OVERLAY_POINTS = 721
+
 # ============================================================================
 # [REFERENCE 3D - HELIX] END
 # ============================================================================
@@ -129,6 +142,10 @@ _step_valid_pair_count = 0
 _helix_elapsed_s = 0.0
 _helix_valid_pair_count = 0
 _helix_finished_reported = False
+
+_wave_circle_elapsed_s = 0.0
+_wave_circle_valid_pair_count = 0
+_wave_circle_finished_reported = False
 
 
 def _validated_path_3d(path) -> np.ndarray:
@@ -274,6 +291,44 @@ def _evaluate_helix_target(
     return target_xyz, info
 
 
+def _validate_wave_circle_configuration() -> None:
+    values = (
+        WAVE_CIRCLE_CENTER_X_CM, WAVE_CIRCLE_CENTER_Y_CM,
+        WAVE_CIRCLE_RADIUS_CM, WAVE_CIRCLE_Z_CENTER_CM,
+        WAVE_CIRCLE_Z_AMPLITUDE_CM, WAVE_CIRCLE_PERIOD_S,
+        WAVE_CIRCLE_TURNS, WAVE_CIRCLE_OVERLAY_POINTS,
+    )
+    if not all(np.isfinite(float(value)) for value in values):
+        raise ValueError("WAVE_CIRCLE configuration must be finite")
+    if WAVE_CIRCLE_RADIUS_CM <= 0 or WAVE_CIRCLE_PERIOD_S <= 0 or WAVE_CIRCLE_TURNS <= 0:
+        raise ValueError("Wave circle radius, period and turns must be positive")
+    if not 0 <= WAVE_CIRCLE_Z_AMPLITUDE_CM < WAVE_CIRCLE_Z_CENTER_CM:
+        raise ValueError("Wave circle amplitude must keep Z above zero")
+    if int(WAVE_CIRCLE_OVERLAY_POINTS) < 2:
+        raise ValueError("WAVE_CIRCLE_OVERLAY_POINTS must be >= 2")
+
+
+def _wave_circle_coordinates(theta) -> np.ndarray:
+    """Evaluate one target or an array of path points, in centimetres."""
+    return np.stack((
+        WAVE_CIRCLE_CENTER_X_CM + WAVE_CIRCLE_RADIUS_CM * np.cos(theta),
+        WAVE_CIRCLE_CENTER_Y_CM + WAVE_CIRCLE_RADIUS_CM * np.sin(theta),
+        WAVE_CIRCLE_Z_CENTER_CM + WAVE_CIRCLE_Z_AMPLITUDE_CM * np.sin(2.0 * theta),
+    ), axis=-1)
+
+
+def _build_wave_circle_path_3d() -> np.ndarray:
+    _validate_wave_circle_configuration()
+    theta = np.linspace(0.0, 2.0 * np.pi * WAVE_CIRCLE_TURNS,
+                        int(WAVE_CIRCLE_OVERLAY_POINTS))
+    path = _wave_circle_coordinates(theta)
+    path.setflags(write=False)
+    return path
+
+
+_WAVE_CIRCLE_PATH_3D = _build_wave_circle_path_3d()
+
+
 def reset_reference_3d() -> None:
     """Reset the 3D reference sequence to its initial state."""
 
@@ -282,12 +337,18 @@ def reset_reference_3d() -> None:
     global _helix_elapsed_s
     global _helix_valid_pair_count
     global _helix_finished_reported
+    global _wave_circle_elapsed_s
+    global _wave_circle_valid_pair_count
+    global _wave_circle_finished_reported
 
     _step_index = 0
     _step_valid_pair_count = 0
     _helix_elapsed_s = 0.0
     _helix_valid_pair_count = 0
     _helix_finished_reported = False
+    _wave_circle_elapsed_s = 0.0
+    _wave_circle_valid_pair_count = 0
+    _wave_circle_finished_reported = False
 
 
 def reference_parameter_snapshot_3d() -> Dict[str, Any]:
@@ -307,6 +368,14 @@ def reference_parameter_snapshot_3d() -> Dict[str, Any]:
         "HELIX_DURATION_S": float(HELIX_DURATION_S),
         "HELIX_OVERLAY_POINTS": int(HELIX_OVERLAY_POINTS),
         "HELIX_HOLD_FINAL": bool(HELIX_HOLD_FINAL),
+        "WAVE_CIRCLE_CENTER_X_CM": float(WAVE_CIRCLE_CENTER_X_CM),
+        "WAVE_CIRCLE_CENTER_Y_CM": float(WAVE_CIRCLE_CENTER_Y_CM),
+        "WAVE_CIRCLE_RADIUS_CM": float(WAVE_CIRCLE_RADIUS_CM),
+        "WAVE_CIRCLE_Z_CENTER_CM": float(WAVE_CIRCLE_Z_CENTER_CM),
+        "WAVE_CIRCLE_Z_AMPLITUDE_CM": float(WAVE_CIRCLE_Z_AMPLITUDE_CM),
+        "WAVE_CIRCLE_PERIOD_S": float(WAVE_CIRCLE_PERIOD_S),
+        "WAVE_CIRCLE_TURNS": float(WAVE_CIRCLE_TURNS),
+        "WAVE_CIRCLE_OVERLAY_POINTS": int(WAVE_CIRCLE_OVERLAY_POINTS),
     }
 
 
@@ -326,10 +395,10 @@ def get_reference_3d(
 
         True:
             Exactly one NEW VALID 3D measurement pair has arrived.
-            Advance step counter or helix elapsed time once.
+            Advance step counter or continuous trajectory time once.
 
     dt_s:
-        Used only by helix mode when ``advance=True``.
+        Used by helix / wave_circle modes when ``advance=True``.
         Ignored by fixed / step modes.
 
     Notes
@@ -344,6 +413,9 @@ def get_reference_3d(
     global _helix_elapsed_s
     global _helix_valid_pair_count
     global _helix_finished_reported
+    global _wave_circle_elapsed_s
+    global _wave_circle_valid_pair_count
+    global _wave_circle_finished_reported
 
     mode = str(REFERENCE_MODE_3D).strip().lower()
 
@@ -480,8 +552,41 @@ def get_reference_3d(
             info,
         )
 
+    if mode == "wave_circle":
+        _validate_wave_circle_configuration()
+        if advance:
+            dt = float(dt_s)
+            if not np.isfinite(dt) or dt < 0.0:
+                raise ValueError(f"dt_s must be finite and >= 0, got {dt_s!r}")
+            _wave_circle_elapsed_s += dt
+            _wave_circle_valid_pair_count += 1
+
+        duration_s = float(WAVE_CIRCLE_PERIOD_S * WAVE_CIRCLE_TURNS)
+        progress = float(np.clip(_wave_circle_elapsed_s / duration_s, 0.0, 1.0))
+        theta = 2.0 * np.pi * WAVE_CIRCLE_TURNS * progress
+        target_xyz = _wave_circle_coordinates(theta)
+        info = {
+            "mode": "wave_circle",
+            "elapsed_s": float(_wave_circle_elapsed_s),
+            "duration_s": duration_s,
+            "progress": progress,
+            "theta_rad": float(theta),
+            "completed_turns": float(WAVE_CIRCLE_TURNS * progress),
+            "finished": bool(progress >= 1.0),
+        }
+        if advance and _wave_circle_valid_pair_count % 20 == 0:
+            print(
+                "[REFERENCE 3D WAVE_CIRCLE] "
+                f"elapsed={_wave_circle_elapsed_s:.2f}s progress={progress:.4f} "
+                f"target_xyz_cm={tuple(np.round(target_xyz, 4))}"
+            )
+        if info["finished"] and not _wave_circle_finished_reported:
+            _wave_circle_finished_reported = True
+            print("[REFERENCE 3D WAVE_CIRCLE FINISHED] Holding final target.")
+        return target_xyz, _WAVE_CIRCLE_PATH_3D, info
+
     raise ValueError(
         "Unsupported REFERENCE_MODE_3D: "
         f"{REFERENCE_MODE_3D!r}. "
-        "Supported modes are 'fixed', 'step', and 'helix'."
+        "Supported modes are 'fixed', 'step', 'helix', and 'wave_circle'."
     )

@@ -21,6 +21,7 @@ Thumbs.db
 *.onetoc2
 
 # Runtime recordings and generated output
+/tmp/
 recordings/
 *.mp4
 *.avi
